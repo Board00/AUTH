@@ -5,7 +5,7 @@ from passlib.context import CryptContext
 from jose import JWTError, jwt
 from datetime import datetime, timedelta
 from typing import Optional
-
+import mysql.connector
 
 # Secret key to encode and decode JWT tokens
 SECRET_KEY = "4c2235a4831caf092d08f89491ff08c7d125e9828e215350f2702c6ca5df311a"
@@ -20,8 +20,29 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 # OAuth2 scheme
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
-# In-memory user storage
-fake_users_db = {}
+# MySQL connection
+mydb = mysql.connector.connect(
+    host="localhost",
+    user="Board",
+    password="@boardKoni1234"
+)
+
+koni = mydb.cursor()
+
+# Create database if it doesn't exist
+koni.execute("CREATE DATABASE IF NOT EXISTS current")
+koni.execute("USE current")
+
+# Create users table if it doesn't exist
+koni.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    username VARCHAR(255) PRIMARY KEY,
+    email VARCHAR(255) NOT NULL,
+    full_name VARCHAR(255),
+    disabled BOOLEAN,
+    hashed_password VARCHAR(255) NOT NULL
+)
+""")
 
 class User(BaseModel):
     username: str
@@ -45,13 +66,20 @@ def verify_password(plain_password, hashed_password):
 def get_password_hash(password):
     return pwd_context.hash(password)
 
-def get_user(db, username: str):
-    if username in db:
-        user_dict = db[username]
-        return UserInDB(**user_dict)
+def get_user(username: str):
+    koni.execute("SELECT * FROM users WHERE username = %s", (username,))
+    result = koni.fetchone()
+    if result:
+        return UserInDB(
+            username=result[0],
+            email=result[1],
+            full_name=result[2],
+            disabled=result[3],
+            hashed_password=result[4]
+        )
 
-def authenticate_user(fake_db, username: str, password: str):
-    user = get_user(fake_db, username)
+def authenticate_user(username: str, password: str):
+    user = get_user(username)
     if not user:
         return False
     if not verify_password(password, user.hashed_password):
@@ -70,18 +98,19 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
 
 @app.post("/signup", response_model=User)
 def signup(user: User, password: str):
-    if user.username in fake_users_db:
+    if get_user(user.username):
         raise HTTPException(status_code=400, detail="Username already registered")
     hashed_password = get_password_hash(password)
-    fake_users_db[user.username] = user.dict()
-    fake_users_db[user.username]["hashed_password"] = hashed_password
+    koni.execute(
+        "INSERT INTO users (username, email, full_name, disabled, hashed_password) VALUES (%s, %s, %s, %s, %s)",
+        (user.username, user.email, user.full_name, user.disabled, hashed_password)
+    )
+    mydb.commit()
     return user
 
-
-
-@app.post("/sign in", response_model=Token)
+@app.post("/signin", response_model=Token)
 def sign_in(form_data: OAuth2PasswordRequestForm = Depends()):
-    user = authenticate_user(fake_users_db, form_data.username, form_data.password)
+    user = authenticate_user(form_data.username, form_data.password)
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -109,7 +138,7 @@ def read_users_me(token: str = Depends(oauth2_scheme)):
         token_data = TokenData(username=username)
     except JWTError:
         raise credentials_exception
-    user = get_user(fake_users_db, username=token_data.username)
+    user = get_user(username=token_data.username)
     if user is None:
         raise credentials_exception
-    return user 
+    return user
